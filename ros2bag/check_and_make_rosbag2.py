@@ -52,12 +52,31 @@ import argparse
 import json
 import os
 import re
+import zipfile
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 TS_NAME_RE = re.compile(r"^(?P<sec>\d{9,})(?:_(?P<frac>\d+))?\.(?P<ext>png|npy|pcd)$", re.IGNORECASE)
+ZED_RGB_MODALITY = "cam_zed_rgb"
+ZED_RGB_IMAGE_TOPIC = "/dataset/cam_zed_rgb/image"
+ZED_RGB_CAMERA_INFO_TOPIC = "/dataset/cam_zed_rgb/camera_info"
+LIDAR_TOPIC = "/dataset/lidar/points"
+ZED_RGB_OPTICAL_FRAME = "front_left_camera_optical_frame"
+FRONT_LIDAR_FRAME = "front_lidar_link"
+CAMERA_INFO_TOPICS = {
+    "cam_zed_rgb": ZED_RGB_CAMERA_INFO_TOPIC,
+    "cam_fish_front": "/dataset/cam_fish_front/camera_info",
+    "cam_fish_left": "/dataset/cam_fish_left/camera_info",
+    "cam_fish_right": "/dataset/cam_fish_right/camera_info",
+}
+CALIBRATED_CAMERA_FRAMES = {
+    "cam_zed_rgb": ZED_RGB_OPTICAL_FRAME,
+    "cam_fish_front": "fish_front_camera_link_optical",
+    "cam_fish_left": "fish_left_camera_link_optical",
+    "cam_fish_right": "fish_right_camera_link_optical",
+}
 
 # ---- PCD header parsing ----
 _PCD_HEADER_KEYS = {
@@ -102,6 +121,15 @@ def iter_files(root: Path) -> Iterable[Path]:
 def load_json(p: Path) -> Any:
     with p.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_calibration_json(path: Path, member: str) -> Any:
+    if path.suffix.lower() == ".zip":
+        with zipfile.ZipFile(path) as archive:
+            with archive.open(member) as file:
+                return json.loads(file.read().decode("utf-8"))
+    candidate = path / member if path.is_dir() else path
+    return load_json(candidate)
 
 
 def read_jsonl_objs(p: Path) -> List[Any]:
@@ -406,6 +434,104 @@ def euler_to_quat(roll: float, pitch: float, yaw: float) -> Tuple[float, float, 
     return (x, y, z, w)
 
 
+def _list_from_intrinsics_entry(entry: Dict[str, Any], direct_key: str, ros_key: str) -> List[float]:
+    if direct_key in entry:
+        values = entry[direct_key]
+    else:
+        matrix = entry.get(ros_key)
+        if not isinstance(matrix, dict) or "data" not in matrix:
+            raise KeyError(f"Missing intrinsics field '{direct_key}'/'{ros_key}.data'")
+        values = matrix["data"]
+    return [float(v) for v in values]
+
+
+def camera_info_values_from_intrinsics(intrinsics: Dict[str, Any], camera_name: str) -> Dict[str, Any]:
+    if camera_name not in intrinsics:
+        raise KeyError(f"Camera '{camera_name}' not found in intrinsics")
+    entry = intrinsics[camera_name]
+    if not isinstance(entry, dict):
+        raise ValueError(f"Camera '{camera_name}' intrinsics entry is not an object")
+
+    width = entry.get("width", entry.get("image_width"))
+    height = entry.get("height", entry.get("image_height"))
+    if width is None or height is None:
+        raise KeyError(f"Camera '{camera_name}' missing width/height")
+
+    d = entry.get("d")
+    if d is None:
+        distortion = entry.get("distortion_coefficients")
+        if not isinstance(distortion, dict) or "data" not in distortion:
+            raise KeyError(f"Camera '{camera_name}' missing distortion coefficients")
+        d = distortion["data"]
+
+    k = _list_from_intrinsics_entry(entry, "k", "camera_matrix")
+    r = _list_from_intrinsics_entry(entry, "r", "rectification_matrix")
+    p = _list_from_intrinsics_entry(entry, "p", "projection_matrix")
+    if len(k) != 9:
+        raise ValueError(f"Camera '{camera_name}' K must contain 9 values")
+    if len(r) != 9:
+        raise ValueError(f"Camera '{camera_name}' R must contain 9 values")
+    if len(p) != 12:
+        raise ValueError(f"Camera '{camera_name}' P must contain 12 values")
+
+    frame_id = (entry.get("header") or {}).get("frame_id")
+    if not frame_id:
+        raise KeyError(f"Camera '{camera_name}' missing header.frame_id")
+
+    return {
+        "width": int(width),
+        "height": int(height),
+        "distortion_model": str(entry.get("distortion_model", "")),
+        "d": [float(v) for v in d],
+        "k": k,
+        "r": r,
+        "p": p,
+        "frame_id": str(frame_id),
+    }
+
+
+def _normalise_quaternion(rotation: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    import math
+
+    x = float(rotation["x"])
+    y = float(rotation["y"])
+    z = float(rotation["z"])
+    w = float(rotation["w"])
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm == 0.0:
+        raise ValueError("Static transform quaternion has zero norm")
+    return x / norm, y / norm, z / norm, w / norm
+
+
+def static_transform_entries_from_extrinsics(extrinsics: Dict[str, Any]) -> List[Dict[str, Any]]:
+    transforms = extrinsics.get("transforms")
+    if not isinstance(transforms, list):
+        raise ValueError("Extrinsics JSON must contain a 'transforms' list")
+
+    entries = []
+    for idx, edge in enumerate(transforms):
+        header = edge.get("header") or {}
+        parent = header.get("frame_id")
+        child = edge.get("child_frame_id")
+        transform = edge.get("transform") or {}
+        translation = transform.get("translation") or {}
+        rotation = transform.get("rotation") or {}
+        if not parent or not child:
+            raise ValueError(f"Static transform {idx} is missing parent or child frame")
+        qx, qy, qz, qw = _normalise_quaternion(rotation)
+        entries.append({
+            "parent": str(parent),
+            "child": str(child),
+            "translation": (
+                float(translation["x"]),
+                float(translation["y"]),
+                float(translation["z"]),
+            ),
+            "rotation": (qx, qy, qz, qw),
+        })
+    return entries
+
+
 # ---------------------------
 # Annotation parsing to vision_msgs
 # ---------------------------
@@ -434,6 +560,13 @@ def make_rosbag2(
     tf_xyzrpy: Tuple[float, float, float, float, float, float],
     tf_period_sec: float,
     write_lidar_viz_markers: bool,
+    write_calibration: bool,
+    calibration_path: Optional[Path],
+    intrinsics_member: str,
+    extrinsics_member: str,
+    camera_name: str,
+    camera_info_topic: str,
+    camera_info_cameras: List[str],
 ) -> None:
     try:
         import numpy as np
@@ -443,7 +576,7 @@ def make_rosbag2(
         from rclpy.serialization import serialize_message
 
         from std_msgs.msg import Header
-        from sensor_msgs.msg import Image, PointCloud2
+        from sensor_msgs.msg import CameraInfo, Image, PointCloud2
         from sensor_msgs_py import point_cloud2
 
         from geometry_msgs.msg import Pose, Point as GPoint, Quaternion, Vector3, TransformStamped
@@ -461,10 +594,10 @@ def make_rosbag2(
         "cam_fish_front": "/dataset/cam_fish_front/image",
         "cam_fish_left": "/dataset/cam_fish_left/image",
         "cam_fish_right": "/dataset/cam_fish_right/image",
-        "cam_zed_rgb": "/dataset/cam_zed_rgb/image",
+        "cam_zed_rgb": ZED_RGB_IMAGE_TOPIC,
         "cam_zed_depth": "/dataset/cam_zed_depth/image",
     }
-    lidar_topic = "/dataset/lidar/points"
+    lidar_topic = LIDAR_TOPIC
 
     # Label topics (vision_msgs)
     label2d_topics = {
@@ -476,6 +609,30 @@ def make_rosbag2(
     label3d_topic = "/dataset/labels/lidar"
 
     viz_lidar_markers_topic = "/dataset/viz/lidar_boxes"
+    camera_info_by_modality: Dict[str, Dict[str, Any]] = {}
+    camera_info_topics: Dict[str, str] = {}
+    static_transforms: List[Dict[str, Any]] = []
+    if write_calibration:
+        if calibration_path is None:
+            raise ValueError("--write-calibration requires --calibration-path")
+        intrinsics = load_calibration_json(calibration_path, intrinsics_member)
+        extrinsics = load_calibration_json(calibration_path, extrinsics_member)
+        for info_camera in camera_info_cameras:
+            if info_camera not in cam_topics or info_camera == "cam_zed_depth":
+                raise ValueError(f"Unsupported CameraInfo camera: {info_camera}")
+            values = camera_info_values_from_intrinsics(intrinsics, info_camera)
+            expected_frame = CALIBRATED_CAMERA_FRAMES.get(info_camera)
+            if expected_frame and values["frame_id"] != expected_frame:
+                raise ValueError(
+                    f"{info_camera} CameraInfo frame_id is {values['frame_id']}, "
+                    f"expected {expected_frame}"
+                )
+            camera_info_by_modality[info_camera] = values
+            camera_info_topics[info_camera] = (
+                camera_info_topic if info_camera == camera_name
+                else CAMERA_INFO_TOPICS[info_camera]
+            )
+        static_transforms = static_transform_entries_from_extrinsics(extrinsics)
 
     # Writer
     out = rosbag_out.resolve()
@@ -488,8 +645,7 @@ def make_rosbag2(
 
     created: Dict[str, str] = {}
 
-    def ensure_topic(topic: str, msg_type: str) -> None:
-        # Leave offered_qos_profiles empty: avoids Humble yaml-cpp QoS parsing issues completely.
+    def ensure_topic(topic: str, msg_type: str, offered_qos_profiles: str = "") -> None:
         if topic in created:
             if created[topic] != msg_type:
                 raise RuntimeError(f"Topic {topic} already created with type {created[topic]}, requested {msg_type}")
@@ -498,7 +654,7 @@ def make_rosbag2(
             name=topic,
             type=msg_type,
             serialization_format="cdr",
-            offered_qos_profiles="",
+            offered_qos_profiles=offered_qos_profiles,
         ))
         created[topic] = msg_type
 
@@ -517,6 +673,20 @@ def make_rosbag2(
         msg.is_bigendian = False
         msg.step = msg.width * 3
         msg.data = arr.tobytes()
+        return msg
+
+    def camera_info_msg(stamp_ns: int, values: Dict[str, Any]) -> CameraInfo:
+        msg = CameraInfo()
+        msg.header.frame_id = values["frame_id"]
+        msg.header.stamp.sec = stamp_ns // 1_000_000_000
+        msg.header.stamp.nanosec = stamp_ns % 1_000_000_000
+        msg.width = values["width"]
+        msg.height = values["height"]
+        msg.distortion_model = values["distortion_model"]
+        msg.d = values["d"]
+        msg.k = values["k"]
+        msg.r = values["r"]
+        msg.p = values["p"]
         return msg
 
     def image_from_depth_npy(path: Path, stamp_ns: int, frame_id: str) -> Image:
@@ -548,7 +718,7 @@ def make_rosbag2(
     def cloud_from_pcd(path: Path, stamp_ns: int) -> PointCloud2:
         xyz = read_pcd_binary_xyz(path)
         hdr = Header()
-        hdr.frame_id = "lidar"
+        hdr.frame_id = FRONT_LIDAR_FRAME if write_calibration else "lidar"
         hdr.stamp.sec = stamp_ns // 1_000_000_000
         hdr.stamp.nanosec = stamp_ns % 1_000_000_000
         return point_cloud2.create_cloud_xyz32(header=hdr, points=xyz.tolist())
@@ -557,9 +727,9 @@ def make_rosbag2(
 
     def write_tf_at_all_timestamps() -> None:
         """
-        Writes a TFMessage (map -> lidar) at every lidar timestamp found in `timeline`.
+        Writes a TFMessage at every lidar timestamp found in `timeline`.
         This guarantees TF coverage for all PointCloud2 + lidar viz markers timestamps,
-        avoiding RViz extrapolation into past/future when Fixed Frame is 'map'.
+        avoiding RViz extrapolation into past/future when using a map-level frame.
         """
         if not write_tf:
             return
@@ -578,7 +748,7 @@ def make_rosbag2(
 
             tfs = TransformStamped()
             tfs.header.frame_id = tf_parent          # e.g. "map"
-            tfs.child_frame_id = tf_child            # e.g. "lidar"
+            tfs.child_frame_id = tf_child            # e.g. "base_link"
             tfs.header.stamp.sec = stamp_ns // 1_000_000_000
             tfs.header.stamp.nanosec = stamp_ns % 1_000_000_000
 
@@ -593,6 +763,32 @@ def make_rosbag2(
             msg = TFMessage()
             msg.transforms = [tfs]
             writer.write("/tf", serialize_message(msg), stamp_ns)
+
+    def write_static_transforms() -> None:
+        if not write_calibration:
+            return
+        if not static_transforms:
+            raise RuntimeError("No static transforms loaded from calibration")
+        ensure_topic("/tf_static", "tf2_msgs/msg/TFMessage")
+        stamp_ns = ns_from_decimal_seconds(timeline[0][0])
+        msg = TFMessage()
+        for entry in static_transforms:
+            tfs = TransformStamped()
+            tfs.header.frame_id = entry["parent"]
+            tfs.child_frame_id = entry["child"]
+            tfs.header.stamp.sec = stamp_ns // 1_000_000_000
+            tfs.header.stamp.nanosec = stamp_ns % 1_000_000_000
+            x, y, z = entry["translation"]
+            qx, qy, qz, qw = entry["rotation"]
+            tfs.transform.translation.x = x
+            tfs.transform.translation.y = y
+            tfs.transform.translation.z = z
+            tfs.transform.rotation.x = qx
+            tfs.transform.rotation.y = qy
+            tfs.transform.rotation.z = qz
+            tfs.transform.rotation.w = qw
+            msg.transforms.append(tfs)
+        writer.write("/tf_static", serialize_message(msg), stamp_ns)
 
     # ---- Labels (vision_msgs) ----
 
@@ -734,15 +930,14 @@ def make_rosbag2(
             if not isinstance(data, list):
                 raise ValueError(f"{p} is not a list")
 
-            # choose frame_id: keep camera name (no TF required for storage)
             if ann_file.startswith("cam_zed_rgb"):
-                frame_id = "cam_zed_rgb"
+                frame_id = ZED_RGB_OPTICAL_FRAME if write_calibration else "cam_zed_rgb"
             elif ann_file.startswith("cam_fish_front"):
-                frame_id = "cam_fish_front"
+                frame_id = CALIBRATED_CAMERA_FRAMES["cam_fish_front"] if write_calibration else "cam_fish_front"
             elif ann_file.startswith("cam_fish_left"):
-                frame_id = "cam_fish_left"
+                frame_id = CALIBRATED_CAMERA_FRAMES["cam_fish_left"] if write_calibration else "cam_fish_left"
             elif ann_file.startswith("cam_fish_right"):
-                frame_id = "cam_fish_right"
+                frame_id = CALIBRATED_CAMERA_FRAMES["cam_fish_right"] if write_calibration else "cam_fish_right"
             else:
                 frame_id = "camera"
 
@@ -779,7 +974,11 @@ def make_rosbag2(
                     continue
                 stamp_ns = ns_from_decimal_seconds(ts)
 
-                d3 = rec_to_detection3d_array(rec, frame_id="lidar", stamp_ns=stamp_ns)
+                d3 = rec_to_detection3d_array(
+                    rec,
+                    frame_id=FRONT_LIDAR_FRAME if write_calibration else "lidar",
+                    stamp_ns=stamp_ns,
+                )
                 writer.write(label3d_topic, serialize_message(d3), stamp_ns)
 
                 if write_lidar_viz_markers:
@@ -787,6 +986,7 @@ def make_rosbag2(
                     writer.write(viz_lidar_markers_topic, serialize_message(ma), stamp_ns)
 
     # ---- Write order: TF -> labels -> sensors ----
+    write_static_transforms()
     write_tf_at_all_timestamps()
     write_labels()
 
@@ -802,8 +1002,17 @@ def make_rosbag2(
             if modality == "cam_zed_depth":
                 msg = image_from_depth_npy(p, stamp_ns, frame_id=modality)
             else:
-                msg = image_from_png(p, stamp_ns, frame_id=modality)
+                frame_id = CALIBRATED_CAMERA_FRAMES.get(modality, modality) if write_calibration else modality
+                msg = image_from_png(p, stamp_ns, frame_id=frame_id)
             writer.write(topic, serialize_message(msg), stamp_ns)
+            if write_calibration and modality in camera_info_by_modality:
+                info_topic = camera_info_topics[modality]
+                ensure_topic(info_topic, "sensor_msgs/msg/CameraInfo")
+                writer.write(
+                    info_topic,
+                    serialize_message(camera_info_msg(stamp_ns, camera_info_by_modality[modality])),
+                    stamp_ns,
+                )
 
         elif modality == "lidar":
             ensure_topic(lidar_topic, "sensor_msgs/msg/PointCloud2")
@@ -833,6 +1042,27 @@ def main() -> None:
     ap.add_argument("--tf-period-sec", type=float, default=0.5)
 
     ap.add_argument("--write-lidar-viz-markers", action="store_true")
+    ap.add_argument(
+        "--write-calibration",
+        action="store_true",
+        help="Write ZED RGB CameraInfo and extrinsics-derived /tf_static.",
+    )
+    ap.add_argument(
+        "--calibration-path",
+        type=Path,
+        default=None,
+        help="Calibration directory or ZIP containing calibration/intrinsics.json and calibration/extrinsics.json.",
+    )
+    ap.add_argument("--intrinsics-member", type=str, default="calibration/intrinsics.json")
+    ap.add_argument("--extrinsics-member", type=str, default="calibration/extrinsics.json")
+    ap.add_argument("--camera-name", type=str, default=ZED_RGB_MODALITY)
+    ap.add_argument("--camera-info-topic", type=str, default=ZED_RGB_CAMERA_INFO_TOPIC)
+    ap.add_argument(
+        "--camera-info-cameras",
+        type=str,
+        default="cam_zed_rgb,cam_fish_front,cam_fish_left,cam_fish_right",
+        help="Comma-separated camera modalities to publish CameraInfo for.",
+    )
 
     args = ap.parse_args()
 
@@ -872,6 +1102,11 @@ def main() -> None:
         xyzrpy = tuple(float(x) for x in args.tf_xyzrpy.split(","))
         if len(xyzrpy) != 6:
             raise SystemExit("--tf-xyzrpy must be 6 comma-separated numbers: x,y,z,roll,pitch,yaw")
+        camera_info_cameras = [
+            item.strip()
+            for item in args.camera_info_cameras.split(",")
+            if item.strip()
+        ]
 
         print(f"Writing rosbag2 to: {args.rosbag_out.resolve()}")
         make_rosbag2(
@@ -885,6 +1120,13 @@ def main() -> None:
             tf_xyzrpy=xyzrpy,
             tf_period_sec=args.tf_period_sec,
             write_lidar_viz_markers=args.write_lidar_viz_markers,
+            write_calibration=args.write_calibration,
+            calibration_path=args.calibration_path,
+            intrinsics_member=args.intrinsics_member,
+            extrinsics_member=args.extrinsics_member,
+            camera_name=args.camera_name,
+            camera_info_topic=args.camera_info_topic,
+            camera_info_cameras=camera_info_cameras,
         )
         print("rosbag2: DONE")
 
