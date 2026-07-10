@@ -73,6 +73,26 @@ the script **stops immediately** and does **not** create a rosbag.
 | cam_zed_depth | /dataset/cam_zed_depth/image | sensor_msgs/msg/Image |
 | lidar | /dataset/lidar/points | sensor_msgs/msg/PointCloud2 |
 
+When `--write-calibration` is used for the AGHRI ZED RGB/Livox workflow:
+
+| Source | ROS topic | Message type | Frame ID |
+|---|---|---|---|
+| `sensor_data/cam_zed_rgb/*.png` | `/dataset/cam_zed_rgb/image` | `sensor_msgs/msg/Image` | `front_left_camera_optical_frame` |
+| `calibration/intrinsics.json` | `/dataset/cam_zed_rgb/camera_info` | `sensor_msgs/msg/CameraInfo` | `front_left_camera_optical_frame` |
+| `sensor_data/cam_fish_front/*.png` | `/dataset/cam_fish_front/image` | `sensor_msgs/msg/Image` | `fish_front_camera_link_optical` |
+| `calibration/intrinsics.json` | `/dataset/cam_fish_front/camera_info` | `sensor_msgs/msg/CameraInfo` | `fish_front_camera_link_optical` |
+| `sensor_data/cam_fish_left/*.png` | `/dataset/cam_fish_left/image` | `sensor_msgs/msg/Image` | `fish_left_camera_link_optical` |
+| `calibration/intrinsics.json` | `/dataset/cam_fish_left/camera_info` | `sensor_msgs/msg/CameraInfo` | `fish_left_camera_link_optical` |
+| `sensor_data/cam_fish_right/*.png` | `/dataset/cam_fish_right/image` | `sensor_msgs/msg/Image` | `fish_right_camera_link_optical` |
+| `calibration/intrinsics.json` | `/dataset/cam_fish_right/camera_info` | `sensor_msgs/msg/CameraInfo` | `fish_right_camera_link_optical` |
+| `sensor_data/lidar/*.pcd` | `/dataset/lidar/points` | `sensor_msgs/msg/PointCloud2` | `front_lidar_link` |
+| `--write-tf` | `/tf` | `tf2_msgs/msg/TFMessage` | dynamic transform, e.g. `map -> base_link` |
+| `calibration/extrinsics.json` | `/tf_static` | `tf2_msgs/msg/TFMessage` | static transform tree |
+
+The converter does not undistort or rectify images. It publishes the PNG files
+as stored and translates the JSON calibration values into CameraInfo (`D`, `K`,
+`R`, `P`) for the requested camera streams.
+
 ---
 
 ### Label topics (ground truth)
@@ -92,9 +112,11 @@ the script **stops immediately** and does **not** create a rosbag.
 
 ### TF handling
 
-- Dynamic /tf (map → lidar)
-- Written at every LiDAR timestamp to avoid extrapolation
-- /tf_static intentionally not used
+- Dynamic `/tf` (map → lidar) is still available through `--write-tf`.
+- Calibration-aware AGHRI conversion writes static sensor transforms from
+  `calibration/extrinsics.json` to `/tf_static`.
+- Original image and LiDAR timestamps are preserved. The converter does not
+  force camera and LiDAR messages onto matching timestamps.
 
 ---
 
@@ -142,6 +164,43 @@ python3 check_and_make_rosbag2.py \
   --tf-xyzrpy 0,0,0,0,0,0
 ```
 
+### Convert with AGHRI ZED RGB/Livox calibration
+
+```bash
+rm -rf <ROS2_BAG_DIR>
+
+python3 check_and_make_rosbag2.py \
+  --bag-dir <DATASET_BAG_DIR> \
+  --make-rosbag \
+  --rosbag-out <ROS2_BAG_DIR> \
+  --write-tf \
+  --tf-parent map \
+  --tf-child base_link \
+  --tf-xyzrpy 0,0,0,0,0,0 \
+  --write-calibration \
+  --calibration-path /media/prabuddhi/Backup2/Updated\ Dataset_PW/calibration.zip \
+  --intrinsics-member calibration/intrinsics.json \
+  --extrinsics-member calibration/extrinsics.json \
+  --camera-name cam_zed_rgb \
+  --camera-info-topic /dataset/cam_zed_rgb/camera_info \
+  --camera-info-cameras cam_zed_rgb,cam_fish_front,cam_fish_left,cam_fish_right
+```
+
+This mode writes one CameraInfo at each selected camera image timestamp, a
+dynamic `/tf` stream at LiDAR timestamps, and one `/tf_static` message
+containing the static transforms from the calibration JSON.
+
+On ROS 2 Humble, play calibration-aware bags with a QoS override that makes
+`/tf_static` transient-local, for example:
+
+```yaml
+/tf_static:
+  history: keep_last
+  depth: 1
+  reliability: reliable
+  durability: transient_local
+```
+
 ### Play
 
 ```bash
@@ -154,7 +213,7 @@ Note: Make sure **--clock** is used
 
 ## RViz2
 
-- Fixed Frame: lidar (no TF) or map (with --write-tf)
+- Fixed Frame: `front_lidar_link` for calibration-aware AGHRI bags, or `lidar`
+  for legacy non-calibrated bags.
 - Add PointCloud2: /dataset/lidar/points
 - Add MarkerArray: /dataset/viz/lidar_boxes
-

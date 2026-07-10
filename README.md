@@ -72,6 +72,12 @@ python .\ros2bag\check_and_make_rosbag2.py --bag-dir <DATASET_BAG_DIR>
 
 Or `cd` into a toolkit folder and follow the local `README.md` there.
 
+For AGHRI ZED RGB/Livox ROS 2 playback, `ros2bag/check_and_make_rosbag2.py`
+is the canonical converter. Its calibration-aware mode reads
+`calibration/intrinsics.json` and `calibration/extrinsics.json` and writes
+standard ZED/fisheye CameraInfo topics, `/tf`, and `/tf_static` messages into
+the bag without changing the original image or LiDAR timestamps.
+
 ## Notes
 
 - `shared/build_manifest_and_splits.py` and `shared/sync_and_match.py` are identical across `v1.0`, `KITTI-converter`, and `YOLO-converter`, so they are stored once.
