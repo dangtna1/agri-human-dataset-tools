@@ -189,6 +189,8 @@ kitti_out/
 **Labels**
 - 2D labels come from the chosen `--ann_source` camera annotation JSON.
 - 3D labels come from `annotations/lidar_ann.json` if `--use_lidar_3d` is enabled.
+- Positive numeric person identities such as `01` and `10` are exported as
+  the standard KITTI object type `Person`.
 - If a camera is fisheye, projection uses a fisheye model (see `--anchor_model`).
 
 ### 5.3 KITTI Depth Completion (`kitti_export_depth.py`)

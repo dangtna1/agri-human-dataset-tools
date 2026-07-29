@@ -107,7 +107,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--human_prefix",
         default="human",
-        help="Source labels starting with this prefix are treated as human classes.",
+        help=(
+            "Legacy human-label prefix retained for compatibility. All non-empty "
+            "source labels, including numeric person IDs, are merged via --merge_all_to."
+        ),
     )
     parser.add_argument(
         "--yaw_unit",
@@ -186,6 +189,8 @@ def map_source_class(raw_name: str, merge_all_to: str, human_prefix: str) -> Opt
     if not name:
         return None
     lower = name.lower()
+    if lower.isdigit() and int(lower) > 0:
+        return merge_all_to
     if lower.startswith(human_prefix.lower()):
         return merge_all_to
     return merge_all_to
@@ -200,6 +205,11 @@ def infer_yaw_unit(yaw_value: float, requested: str) -> str:
 
 
 def parse_bbox_3d(values: Sequence[float], yaw_unit: str) -> Tuple[List[float], Dict[str, float]]:
+    if (
+        len(values) == 2
+        and all(isinstance(item, list) and len(item) == 9 for item in values)
+    ):
+        values = values[0]  # type: ignore[assignment]
     if len(values) == 7:
         x, y, z, dx, dy, dz, yaw_raw = map(float, values)
         roll = 0.0
@@ -274,7 +284,7 @@ def load_lidar_annotations(
                 continue
             try:
                 bbox_3d, extras = parse_bbox_3d(bbox_values, yaw_unit=yaw_unit)
-            except ValueError:
+            except (TypeError, ValueError):
                 continue
 
             if bbox_3d[3] <= 0 or bbox_3d[4] <= 0 or bbox_3d[5] <= 0:

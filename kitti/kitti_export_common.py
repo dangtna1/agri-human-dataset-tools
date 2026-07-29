@@ -90,7 +90,11 @@ def load_sync(session_dir: Path) -> List[dict]:
         return []
     try:
         obj = json.loads(p.read_text(encoding="utf-8"))
-        return obj.get("samples", obj)  # support list or {"samples":[...]}
+        if isinstance(obj, list):
+            return obj
+        if isinstance(obj, dict) and isinstance(obj.get("samples"), list):
+            return obj["samples"]
+        return []
     except Exception:
         return []
 
@@ -372,6 +376,22 @@ def pcd_to_bin(pcd_path: Path, bin_path: Path):
 def _norm_key(s: str) -> str:
     return Path(s).stem.lower()
 
+def _parse_xywh(raw):
+    box = raw
+    if (
+        isinstance(box, list)
+        and box
+        and isinstance(box[0], dict)
+        and isinstance(box[0].get("Position"), list)
+    ):
+        box = box[0]["Position"]
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    try:
+        return [float(v) for v in box]
+    except (TypeError, ValueError):
+        return None
+
 def _to_kitti_obj(obj):
     # Already KITTI-like?
     if "type" in obj and "bbox" in obj and isinstance(obj["bbox"], (list, tuple)) and len(obj["bbox"]) == 4:
@@ -379,16 +399,25 @@ def _to_kitti_obj(obj):
         return {"type": str(obj["type"]), "bbox": [float(xmin), float(ymin), float(xmax), float(ymax)]}
     # Your schema: Class + BoundingBoxes [x,y,w,h]
     cls = obj.get("Class") or obj.get("class") or obj.get("label")
-    bb  = obj.get("BoundingBoxes") or obj.get("bbox") or obj.get("box")
-    if cls is not None and isinstance(bb, (list, tuple)) and len(bb) == 4:
-        x, y, w, h = [float(v) for v in bb]
+    bb = _parse_xywh(obj.get("BoundingBoxes") or obj.get("bbox") or obj.get("box"))
+    if cls is not None and bb is not None:
+        x, y, w, h = bb
         xmin, ymin = x, y
         xmax, ymax = x + w, y + h
-        cls_map = {
-            "human": "Person", "person": "Person",
-            "human1": "Person", "human2": "Person",
-        }
-        kitti_type = cls_map.get(str(cls).lower(), str(cls))
+        cls_name = str(cls).strip()
+        cls_lower = cls_name.lower()
+        is_numeric_person_id = cls_lower.isdigit() and int(cls_lower) > 0
+        is_legacy_human = (
+            cls_lower == "human"
+            or (
+                cls_lower.startswith("human")
+                and cls_lower[5:].isdigit()
+                and int(cls_lower[5:]) > 0
+            )
+        )
+        kitti_type = "Person" if (
+            cls_lower == "person" or is_numeric_person_id or is_legacy_human
+        ) else cls_name
         return {"type": kitti_type, "bbox": [xmin, ymin, xmax, ymax]}
     return None
 

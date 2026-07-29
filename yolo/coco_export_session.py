@@ -160,15 +160,38 @@ def get_labels_for_image(ann_idx: Dict[str, List[dict]], filename: str) -> List[
     return ann_idx.get(k1, ann_idx.get(k2, []))
 
 
+def parse_xywh(raw: object) -> Optional[Tuple[float, float, float, float]]:
+    """Parse a flat xywh box or the dataset's wrapped Position representation."""
+    box = raw
+    if (
+        isinstance(box, list)
+        and box
+        and isinstance(box[0], dict)
+        and isinstance(box[0].get("Position"), list)
+    ):
+        box = box[0]["Position"]
+    if not isinstance(box, (list, tuple)) or len(box) < 4:
+        return None
+    try:
+        return tuple(float(v) for v in box[:4])  # type: ignore[return-value]
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize_class_name(name: str, merge_humans_to_person: bool) -> str:
     """
-    If merge_humans_to_person=True:
-      human1..human5 (case-insensitive) => person
+    Numeric person identities (for example ``01`` or ``10``) always become
+    the semantic detection class ``person``.
+
+    If merge_humans_to_person=True, legacy human1..human5 labels also become
+    ``person``.
     """
     n = (name or "").strip()
     if not n:
         return n
     low = n.lower()
+    if low.isdigit() and int(low) > 0:
+        return "person"
     if merge_humans_to_person and low.startswith("human"):
         suffix = low[5:]
         if suffix.isdigit():
@@ -435,13 +458,13 @@ def export_one_session(
 
         for obj in objs:
             cls = obj.get("Class") or obj.get("class") or obj.get("type")
-            bb = obj.get("BoundingBoxes") or obj.get("bbox") or obj.get("box")
-            if cls is None or bb is None:
-                continue
-            if not isinstance(bb, (list, tuple)) or len(bb) < 4:
+            box = parse_xywh(
+                obj.get("BoundingBoxes") or obj.get("bbox") or obj.get("box")
+            )
+            if cls is None or box is None:
                 continue
 
-            x, y, w, h = map(float, bb[:4])
+            x, y, w, h = box
             x, y, w, h = _clamp_bbox_xywh(x, y, w, h, W, H)
             if w <= 0.0 or h <= 0.0:
                 continue
@@ -524,7 +547,7 @@ def main() -> None:
     ap.add_argument(
         "--merge_humans_to_person",
         action="store_true",
-        help="Map human1..human5 -> person automatically",
+        help="Also map legacy human1..human5 labels to person; numeric person IDs are always mapped",
     )
 
     args = ap.parse_args()

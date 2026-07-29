@@ -6,13 +6,14 @@ Each annotation record must have the structure::
     {
         "File": "frame_0001.png",
         "Labels": [
-            {"Class": "human1", "BoundingBoxes": [x, y, w, h]},
+            {"Class": "01", "BoundingBoxes": [x, y, w, h]},
             ...
         ]
     }
 
-Class names with a numeric suffix (e.g. ``human3``) map to that integer as the
-track ID. Names without a suffix get a stable ID derived from their SHA-1 hash.
+Digit-only person identities map to their integer track ID (for example,
+``"03"`` maps to track ID ``3``). Names without digits get a stable ID derived
+from their SHA-1 hash for backward compatibility.
 
 Usage:
     python gt_to_mot2d.py \\
@@ -25,12 +26,30 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Iterable, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
+
+def _parse_2d_box(raw: object) -> Optional[Tuple[float, float, float, float]]:
+    """Parse either a flat xywh box or the dataset's wrapped Position form."""
+    box = raw
+    if (
+        isinstance(box, list)
+        and box
+        and isinstance(box[0], dict)
+        and isinstance(box[0].get("Position"), list)
+    ):
+        box = box[0]["Position"]
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    try:
+        return tuple(float(v) for v in box)  # type: ignore[return-value]
+    except (TypeError, ValueError):
+        return None
+
 
 def _iter_labels(record: dict) -> Iterable[Tuple[str, Tuple[float, float, float, float]]]:
     """Yield ``(class_name, (x, y, w, h))`` pairs from one annotation record."""
@@ -38,10 +57,12 @@ def _iter_labels(record: dict) -> Iterable[Tuple[str, Tuple[float, float, float,
         if not isinstance(label, dict):
             continue
         cls = label.get("Class") or label.get("class") or label.get("label")
-        box = label.get("BoundingBoxes") or label.get("bbox") or label.get("box")
-        if cls is None or box is None or len(box) != 4:
+        box = _parse_2d_box(
+            label.get("BoundingBoxes") or label.get("bbox") or label.get("box")
+        )
+        if cls is None or box is None:
             continue
-        yield str(cls), tuple(float(v) for v in box)  # type: ignore[return-value]
+        yield str(cls), box
 
 
 def _class_to_track_id(class_name: str) -> int:
