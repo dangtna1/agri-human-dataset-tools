@@ -116,6 +116,10 @@ test_dataloader = dict(
         test_mode=True))
 ```
 
+Numeric source identities such as `01` and `10` are merged into the single
+semantic class `person`. The identity is intentionally not used as an
+MMDetection3D category.
+
 For `LoadPointsFromFile`, keep `load_dim=4` and `use_dim=4`.
 
 Use `export_summary.json` to set:

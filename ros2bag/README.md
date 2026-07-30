@@ -102,6 +102,10 @@ as stored and translates the JSON calibration values into CameraInfo (`D`, `K`,
 | cam_*_ann.json | /dataset/labels/<camera> | vision_msgs/msg/Detection2DArray |
 | lidar_ann.json | /dataset/labels/lidar | vision_msgs/msg/Detection3DArray |
 
+For numeric annotation classes, each detection keeps the original zero-padded
+person identity (for example `01`) in `detection.id`. The hypothesis
+`class_id` is the semantic label `person`.
+
 ---
 
 ### Optional visualization

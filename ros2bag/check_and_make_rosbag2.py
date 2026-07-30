@@ -536,13 +536,30 @@ def static_transform_entries_from_extrinsics(extrinsics: Dict[str, Any]) -> List
 # Annotation parsing to vision_msgs
 # ---------------------------
 
-def class_to_int_id(class_name: str) -> int:
-    """
-    Deterministic mapping for RViz/consumers without a pre-defined taxonomy.
-    You can swap this for a fixed dict if you have a known label set.
-    """
-    # stable 32-bit hash -> positive int
-    return (hash(class_name) & 0x7FFFFFFF)
+def normalize_person_identity(class_name: str) -> Optional[str]:
+    """Return a zero-padded numeric person identity, or ``None`` if invalid."""
+    identity = class_name.strip()
+    if not identity.isdigit() or int(identity) <= 0:
+        return None
+    return identity
+
+
+def parse_annotation_xywh(raw: object) -> Optional[Tuple[float, float, float, float]]:
+    """Parse a flat xywh box or the dataset's wrapped Position representation."""
+    box = raw
+    if (
+        isinstance(box, list)
+        and box
+        and isinstance(box[0], dict)
+        and isinstance(box[0].get("Position"), list)
+    ):
+        box = box[0]["Position"]
+    if not isinstance(box, list) or len(box) < 4:
+        return None
+    try:
+        return tuple(float(v) for v in box[:4])  # type: ignore[return-value]
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------
@@ -806,16 +823,19 @@ def make_rosbag2(
             if not isinstance(lb, dict):
                 continue
             cls = lb.get("Class")
-            bb = lb.get("BoundingBoxes")
-            if not isinstance(cls, str) or not isinstance(bb, list) or len(bb) < 4:
+            box = parse_annotation_xywh(lb.get("BoundingBoxes"))
+            if not isinstance(cls, str) or box is None:
+                continue
+            person_id = normalize_person_identity(cls)
+            if person_id is None:
                 continue
             try:
-                x, y, w, h = [float(v) for v in bb[:4]]
+                x, y, w, h = box
             except Exception:
                 continue
 
             det = Detection2D()
-            det.id = str(i)
+            det.id = person_id
 
             bbox = BoundingBox2D()
             # vision_msgs uses center + size
@@ -827,7 +847,7 @@ def make_rosbag2(
             det.bbox = bbox
 
             hyp = ObjectHypothesisWithPose()
-            hyp.hypothesis.class_id = str(class_to_int_id(cls))
+            hyp.hypothesis.class_id = "person"
             hyp.hypothesis.score = 1.0
             # pose unused for 2D
             det.results.append(hyp)
@@ -853,13 +873,16 @@ def make_rosbag2(
             bb = lb.get("BoundingBoxes")
             if not isinstance(cls, str) or not isinstance(bb, list) or len(bb) < 9:
                 continue
+            person_id = normalize_person_identity(cls)
+            if person_id is None:
+                continue
             try:
                 x, y, z, dx, dy, dz, roll, pitch, yaw = [float(v) for v in bb[:9]]
             except Exception:
                 continue
 
             det = Detection3D()
-            det.id = str(i)
+            det.id = person_id
 
             bbox = BoundingBox3D()
             bbox.center.position.x = x
@@ -876,7 +899,7 @@ def make_rosbag2(
             det.bbox = bbox
 
             hyp = ObjectHypothesisWithPose()
-            hyp.hypothesis.class_id = str(class_to_int_id(cls))
+            hyp.hypothesis.class_id = "person"
             hyp.hypothesis.score = 1.0
             # Use pose to store bbox center pose (optional, but consistent)
             hyp.pose.pose = Pose()

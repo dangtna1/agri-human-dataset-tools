@@ -240,18 +240,21 @@ All scripts are **OS-independent**.
 
 ## 6. Class Mapping
 
-### Merge all human classes into `person` (recommended)
+### Numeric person identities
 
-```bash
---merge_humans_to_person
+Numeric annotation classes are interpreted as person identities and
+automatically merged into the semantic detection class `person`:
+
+```text
+01, 02, ..., 10 → person
 ```
 
-This automatically converts:
-```
-human1, human2, human3, human4, human5 → person
-```
+No class-map option is required for the numeric-ID annotation format.
 
-### Custom class mapping
+For legacy annotations, `--merge_humans_to_person` additionally converts
+`human1` through `human5` to `person`.
+
+### Custom class mapping for non-person labels
 
 ```bash
 --class_map '{"human1":"person","worker":"person"}'

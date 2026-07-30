@@ -10,7 +10,7 @@ Each annotation record must follow the structure::
         "File": "frame_0001.pcd",
         "Labels": [
             {
-                "Class": "human1",
+                "Class": "01",
                 "BoundingBoxes": [[x, y, z, dx, dy, dz, rx, ry, rz], ...]
             },
             ...
@@ -81,11 +81,11 @@ def _parse_box(raw: object) -> Optional[List[float]]:
 # Conversion
 # ---------------------------------------------------------------------------
 
-def convert(ann_json: Path, out: Path, class_prefix: str = "human") -> None:
+def convert(ann_json: Path, out: Path, class_prefix: str = "") -> None:
     """Write *ann_json* to MOT3D CSV format at *out*.
 
-    Only labels whose ``Class`` (lower-cased) starts with *class_prefix* are
-    included.  Pass ``class_prefix=""`` to include every label.
+    By default, digit-only person identities such as ``"01"`` are included.
+    Set *class_prefix* to process a legacy label family such as ``"human"``.
     """
     records: list = json.loads(ann_json.read_text(encoding="utf-8"))
 
@@ -100,8 +100,11 @@ def convert(ann_json: Path, out: Path, class_prefix: str = "human") -> None:
 
         frame_id += 1
         for label in record.get("Labels", []):
-            cls = str(label.get("Class", "")).lower()
-            if class_prefix and not cls.startswith(class_prefix):
+            cls = str(label.get("Class", "")).strip().lower()
+            if class_prefix:
+                if not cls.startswith(class_prefix.strip().lower()):
+                    continue
+            elif not cls.isdigit() or int(cls) <= 0:
                 continue
             box = _parse_box(label.get("BoundingBoxes"))
             if box is None:
@@ -155,11 +158,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--class-prefix",
-        default="human",
+        default="",
         metavar="PREFIX",
         help=(
-            "Only include labels whose Class (lowercased) starts with this "
-            "string.  Use an empty string to include all labels. (default: human)"
+            "Optional legacy Class prefix, for example 'human'. By default, "
+            "only positive digit-only person identities such as '01' are included."
         ),
     )
     return parser
