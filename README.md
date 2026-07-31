@@ -161,6 +161,10 @@ Each dataset archive contains one or more released sequence folders ending in `_
 
 `dataset_summary.csv` provides a dataset-level index describing the released sequences and the archive containing each sequence. This allows users to identify and download only the archives required for a particular experiment.
 
+`occlusion_log.csv` provides event-level visibility annotations derived from manual inspection of the **front ZED RGB camera**. Each entry identifies the sequence, participant, occlusion type, start time, duration, and corresponding frame range. The recorded event types are `Partial`, `Total`, and `Total out of frame`.
+
+The `Occlusions` column in `dataset_summary.csv` instead provides a sequence-level description of the **physical sources of occlusion**, such as people, objects, or infrastructure. A value of `none` means that no physical occluder was identified in that sequence. It does not necessarily mean that every person is fully visible in every frame. For example, a person may be partially outside the image because they are very close to the camera or crossing the image boundary. These cases are not classified as physical occlusions in `dataset_summary.csv`, but they may appear as `Partial` events in `occlusion_log.csv`, which records visibility changes and field-of-view truncation in the front ZED RGB view.
+
 ## Released Dataset Structure
 
 After the selected archives and calibration files are extracted, the dataset follows the structure below.
