@@ -14,6 +14,18 @@ The README is divided into two parts:
 
 ---
 
+## ▶ Watch the AGHRI Dataset Video
+
+[<img src="https://img.youtube.com/vi/pOl1My9Ecq0/hqdefault.jpg"
+      width="640"
+      alt="Watch the AGHRI dataset video">](https://www.youtube.com/watch?v=pOl1My9Ecq0)
+
+[![Watch on YouTube](https://img.shields.io/badge/Watch_on_YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=pOl1My9Ecq0)
+
+*Click the button above to watch the AGHRI dataset video on YouTube.*
+
+---
+
 # Part I — AGHRI Dataset
 
 ## Dataset Overview
